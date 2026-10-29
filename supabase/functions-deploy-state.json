@@ -1,0 +1,9 @@
+{
+  "projectId": "72382261",
+  "functions": {
+    "capture-ip": {
+      "hasChanged": false,
+      "hash": "66dcf8a5dffa30a3e2fc1fe7516098c0af631846074f3df6cc81988622bdb9272ebb8bdaafc04efd198385af48e1f5d4e643112c67cacfb2b22e4ca6ffc08537"
+    }
+  }
+}

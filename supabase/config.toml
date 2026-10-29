@@ -1,0 +1,2 @@
+[functions.capture-ip]
+verify_jwt = false
