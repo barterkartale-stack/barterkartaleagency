@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowRight, ChevronDown, HelpCircle, MessageSquare, X, Send,
-  ExternalLink, PackageCheck, ShieldCheck, IndianRupee, Users, Zap
+  ExternalLink, Zap
 } from 'lucide-react';
 
 type ChatMessage = {

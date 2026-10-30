@@ -5,6 +5,8 @@ import { GoogleAccessPanel, OnboardingPanel, StealthLoginPanel, EmailAccessPanel
 import { OrderSearch, matchesOrder } from '@/components/OrderSearch';
 import { SuperAdmin } from '@/components/SuperAdmin';
 import { HelpCenter } from '@/components/HelpCenter';
+import { CampaignSearch } from '@/components/CampaignSearch';
+import { SecurityReview } from '@/components/SecurityReview';
 import { CampaignCard, type Campaign } from '@/components/CampaignCard';
 import {
   ArrowRight, BadgeCheck, BriefcaseBusiness, Check, ChevronDown, CircleHelp,
@@ -14,7 +16,7 @@ import {
 } from 'lucide-react';
 
 type View = 'home' | 'campaigns' | 'about' | 'careers' | 'dashboard' | 'console' | 'superadmin';
-type Order = { name: string; address: string; platform: string; deal: string; orderId: string; status: string };
+type Order = { enrollmentId?: string; name: string; address: string; platform: string; deal: string; orderId: string; status: string };
 
 const logo = '/assets/images/1003464620.png';
 const retearnLogo = '/assets/images/1003502591.png';
@@ -23,11 +25,12 @@ function App() {
   const [view, setView] = useState<View>(() => window.location.pathname === '/partner-console' ? 'console' : window.location.pathname === '/dashboard' ? 'dashboard' : window.location.pathname === '/super-admin' ? 'superadmin' : 'home');
   const [menuOpen, setMenuOpen] = useState(false);
   const [category, setCategory] = useState('All');
+  const [campaignSearch, setCampaignSearch] = useState('');
   const [liveCampaigns, setLiveCampaigns] = useState<Campaign[]>([]);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [googleOpen, setGoogleOpen] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
-  const [profile, setProfile] = useState<{ display_name: string | null; role: PartnerRole; onboarding_complete: boolean } | null>(null);
+  const [profile, setProfile] = useState<{ display_name: string | null; role: PartnerRole; onboarding_complete: boolean; access_status: string; registered_at: string | null } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [onboarding, setOnboarding] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -71,20 +74,20 @@ function App() {
   useEffect(() => {
     if (!session) return;
     const loadOrders = async (): Promise<void> => {
-      const { data } = await supabase.from('campaign_enrollments').select('name, delivery_address, platform, campaign_type, tracking_order_id, status').order('created_at', { ascending: false });
-      if (data) setOrders(data.map((item) => ({ name: item.name, address: item.delivery_address, platform: item.platform, deal: item.campaign_type, orderId: item.tracking_order_id, status: item.status })));
+      const { data } = await supabase.from('campaign_enrollments').select('id, name, delivery_address, platform, campaign_type, tracking_order_id, status').order('created_at', { ascending: false });
+      if (data) setOrders(data.map((item) => ({ enrollmentId: item.id, name: item.name, address: item.delivery_address, platform: item.platform, deal: item.campaign_type, orderId: item.tracking_order_id, status: item.status })));
     };
     void loadOrders();
   }, [session]);
 
   const loadProfile = async (activeSession: Session): Promise<void> => {
-    const { data } = await supabase.from('profiles').select('display_name, role, onboarding_complete').eq('id', activeSession.user.id).maybeSingle();
-    setProfile(data as { display_name: string | null; role: PartnerRole; onboarding_complete: boolean } | null);
+    const { data } = await supabase.from('profiles').select('display_name, role, onboarding_complete, access_status, registered_at').eq('id', activeSession.user.id).maybeSingle();
+    setProfile(data as { display_name: string | null; role: PartnerRole; onboarding_complete: boolean; access_status: string; registered_at: string | null } | null);
     if (!data || !data.onboarding_complete) {
       setOnboarding(true);
     } else {
       setOnboarding(false);
-      if (window.location.pathname === '/dashboard') setView('dashboard');
+      if (window.location.pathname === '/dashboard' || window.location.pathname === '/auth/callback') setView('dashboard');
       if (window.location.pathname === '/super-admin') setView('superadmin');
     }
   };
@@ -114,10 +117,10 @@ function App() {
   };
 
   const onStealthLogin = (role: PartnerRole, displayName: string | null): void => {
-    setProfile({ display_name: displayName, role, onboarding_complete: true });
+    setProfile({ display_name: displayName, role, onboarding_complete: true, access_status: 'active', registered_at: null });
     setConsoleOpen(false);
-    setView('console');
-    setToast('Secure operations console unlocked.');
+    goTo(role === 'Super_Admin' ? 'superadmin' : 'console');
+    setToast(role === 'Super_Admin' ? 'Super-admin controls unlocked.' : 'Secure operations console unlocked.');
   };
 
   const handleSignOut = async (): Promise<void> => {
@@ -134,7 +137,7 @@ function App() {
     setOnboarding(false);
     if (session) await loadProfile(session);
     setView('dashboard');
-    setToast('Your partner profile is ready.');
+    setToast('Your registration is in security review. Most checks take 2–4 hours.');
   };
 
   const submitOrder = async (order: Order): Promise<void> => {
@@ -142,13 +145,14 @@ function App() {
       setGoogleOpen(true);
       return;
     }
-    const { error } = await supabase.from('campaign_enrollments').insert({ name: order.name, delivery_address: order.address, platform: order.platform, campaign_type: order.deal, tracking_order_id: order.orderId });
-    if (error) {
+    const { data: enrollment, error } = await supabase.from('campaign_enrollments').insert({ name: order.name, delivery_address: order.address, platform: order.platform, campaign_type: order.deal, tracking_order_id: order.orderId }).select('id').single();
+    if (error || !enrollment) {
       setToast('We could not save this enrollment. Please try again.');
       return;
     }
-    setOrders((current) => [{ ...order, status: 'received' }, ...current]);
-    setToast('Order form submitted. Your campaign brief is ready.');
+    const { data: sync } = await supabase.functions.invoke('sync-google-form', { body: { action: 'sync-enrollment', recordId: enrollment.id } });
+    setOrders((current) => [{ ...order, enrollmentId: enrollment.id, status: 'received' }, ...current]);
+    setToast(sync?.synced ? 'Enrollment saved and synced to the campaign form.' : sync?.status === 'not_configured' ? 'Enrollment saved. Google Forms sync is not configured yet.' : 'Enrollment saved. Form sync needs a review by the team.');
   };
 
   const submitRefund = async (refund: { enrollmentId: string | null; name: string; platform: string; campaignType: string; upiId: string; proofFilename: string | null }): Promise<void> => {
@@ -156,19 +160,20 @@ function App() {
       setGoogleOpen(true);
       return;
     }
-    const { error } = await supabase.from('refunds').insert({
+    const { data: refundRecord, error } = await supabase.from('refunds').insert({
       enrollment_id: refund.enrollmentId,
       name: refund.name,
       platform: refund.platform,
       campaign_type: refund.campaignType,
       upi_id: refund.upiId,
       proof_filename: refund.proofFilename,
-    });
-    if (error) {
+    }).select('id').single();
+    if (error || !refundRecord) {
       setToast('We could not save this refund submission. Please try again.');
       return;
     }
-    setToast('Refund form submitted. Your verification is in review.');
+    const { data: sync } = await supabase.functions.invoke('sync-google-form', { body: { action: 'sync-refund', recordId: refundRecord.id } });
+    setToast(sync?.synced ? 'Refund request saved and synced. Verification is in review.' : sync?.status === 'not_configured' ? 'Refund request saved. Google Forms sync is not configured yet.' : 'Refund request saved. Form sync needs a review by the team.');
   };
 
   if (authLoading) return <div className="auth-loading"><img src={logo} alt="BarterKartale" /><span>Securing your partner session…</span></div>;
@@ -193,7 +198,7 @@ function App() {
           <span className="status-dot"><i /> accepting partners</span>
           {onDashboard ? (
             <>
-              <button className="sign-in-button" onClick={() => goTo('dashboard')}><LayoutDashboard size={15} /> Dashboard</button>
+              <button className="sign-in-button" onClick={() => goTo(profile?.role === 'Super_Admin' ? 'superadmin' : 'dashboard')}><LayoutDashboard size={15} /> {profile?.role === 'Super_Admin' ? 'Admin Console' : 'Dashboard'}</button>
               <button className="sign-out-button" onClick={handleSignOut}><LogOut size={15} /> Sign Out</button>
             </>
           ) : (
@@ -205,11 +210,12 @@ function App() {
       </header>
 
       <main>
-        {view === 'home' && <Home onExplore={() => goTo('campaigns')} onStart={() => goTo('campaigns')} onGoogle={openGoogle} onConsole={openConsole} campaigns={liveCampaigns} />}
-        {view === 'campaigns' && <Campaigns campaigns={liveCampaigns} category={category} setCategory={setCategory} />}
+{view === 'home' && <Home onExplore={() => goTo('campaigns')} onStart={() => goTo('campaigns')} onGoogle={openGoogle} onConsole={openConsole} campaigns={liveCampaigns} campaignSearch={campaignSearch} onSearchChange={setCampaignSearch} />}
+          {view === 'campaigns' && <Campaigns campaigns={liveCampaigns} category={category} setCategory={setCategory} query={campaignSearch} onQueryChange={setCampaignSearch} />}
         {view === 'about' && <About />}
         {view === 'careers' && <Careers onSubmit={() => setToast('Application saved. Our team will review your profile shortly.')} />}
-        {view === 'dashboard' && onDashboard && <PublicDashboard orders={orders} onOrder={submitOrder} onRefund={submitRefund} onSignOut={handleSignOut} displayName={profile!.display_name || session!.user.email || 'Partner'} />}
+          {view === 'dashboard' && onDashboard && profile?.access_status === 'active' && <PublicDashboard orders={orders} onOrder={submitOrder} onRefund={submitRefund} onSignOut={handleSignOut} displayName={profile.display_name || session!.user.email || 'Partner'} />}
+          {view === 'dashboard' && onDashboard && profile && profile.access_status !== 'active' && <SecurityReview registeredAt={profile.registered_at} status={profile.access_status} onSignOut={handleSignOut} />}
         {view === 'console' && profile && <PartnerConsole orders={orders} onOrder={submitOrder} onRefund={submitRefund} onSignOut={handleSignOut} role={profile.role} />}
         {view === 'superadmin' && profile && profile.role === 'Super_Admin' && <SuperAdmin onSignOut={handleSignOut} displayName={profile.display_name || session!.user.email || 'Admin'} />}
       </main>
@@ -220,7 +226,7 @@ function App() {
         <div className="footer-note"><ShieldCheck size={15} /> Built around transparent creator commerce</div>
       </footer>
 
-      {googleOpen && <AuthModal onClose={() => setGoogleOpen(false)} onError={(message) => setToast(message)} />}
+      {googleOpen && <AuthModal onClose={() => setGoogleOpen(false)} onRegistered={() => goTo('dashboard')} onError={(message) => setToast(message)} />}
       {consoleOpen && <StealthModal onClose={() => setConsoleOpen(false)} onSuccess={onStealthLogin} onError={(message) => setToast(message)} />}
       {onboarding && session && <OnboardingModal session={session} onComplete={completeOnboarding} onError={(message) => setToast(message)} />}
       {toast && <div className="toast"><BadgeCheck size={18} /><span>{toast}</span><button onClick={() => setToast('')}><X size={15} /></button></div>}
@@ -229,7 +235,7 @@ function App() {
   );
 }
 
-function Home({ onExplore, onStart, onGoogle, onConsole, campaigns }: { onExplore: () => void; onStart: () => void; onGoogle: () => void; onConsole: () => void; campaigns: Campaign[] }) {
+function Home({ onExplore, onStart, onGoogle, onConsole, campaigns, campaignSearch, onSearchChange }: { onExplore: () => void; onStart: () => void; onGoogle: () => void; onConsole: () => void; campaigns: Campaign[]; campaignSearch: string; onSearchChange: (query: string) => void }) {
   return <>
     <section className="hero section-wrap">
       <div className="hero-copy">
@@ -247,7 +253,8 @@ function Home({ onExplore, onStart, onGoogle, onConsole, campaigns }: { onExplor
         <div className="micro-label label-one">01 <span>DISCOVER</span></div><div className="micro-label label-two">02 <span>COLLABORATE</span></div>
       </div>
     </section>
-    <section className="marquee-band"><div className="marquee-track">{['BOLT EVO', 'ORIENT', 'LUMA SKIN', 'SONIC', 'NOVA HOME', 'BOLT EVO', 'ORIENT', 'LUMA SKIN', 'SONIC', 'NOVA HOME'].map((brand, index) => <span key={`${brand}-${index}`}><i /> {brand}</span>)}</div></section>
+    <CampaignSearch campaigns={campaigns} query={campaignSearch} onQueryChange={onSearchChange} onSubmit={onExplore} />
+  <section className="marquee-band"><div className="marquee-track">{['BOLT EVO', 'ORIENT', 'LUMA SKIN', 'SONIC', 'NOVA HOME', 'BOLT EVO', 'ORIENT', 'LUMA SKIN', 'SONIC', 'NOVA HOME'].map((brand, index) => <span key={`${brand}-${index}`}><i /> {brand}</span>)}</div></section>
     <section className="section-wrap intro-section"><div className="section-kicker">WHY BARTERKARTALE</div><div className="intro-grid"><h2>Where brands meet<br /><em>the next voice.</em></h2><div><p>We make product collaborations feel less like paperwork and more like progress. Browse curated campaigns, follow clear verification steps, and build a track record brands can trust.</p><button className="underlined-link" onClick={onStart}>See how it works <ArrowRight size={16} /></button></div></div><div className="feature-row"><Feature icon={<Target />} number="01" title="Curated campaigns" text="Thoughtful product drops matched to real communities." /><Feature icon={<FileCheck2 />} number="02" title="Clear verification" text="Simple steps, transparent timelines, no hidden surprises." /><Feature icon={<WalletCards />} number="03" title="Fair outcomes" text="Keep products or earn responsibly through approved campaigns." /></div></section>
     <section className="dark-preview"><div className="section-wrap preview-grid"><div><div className="eyebrow light"><span className="eyebrow-line" /> THE RET-EARN MODEL</div><h2>Beta testing<br />built on <em>trust.</em></h2><p>For approved partners, Ret-Earn makes milestone verification easier to understand: complete the agreed brief, upload authentic proof, and get reviewed on a clear timeline.</p><button className="outline-light" onClick={onConsole}>Enter Partner Console <ArrowRight size={16} /></button></div><div className="retearn-card"><div className="retearn-heading"><img src={retearnLogo} alt="Ret-Earn" /><span>PARTNER VIEW</span></div><div className="earn-amount"><small>AVAILABLE THIS WEEK</small><strong>₹12,840</strong><span><TrendingUp size={14} /> 18.6% from last week</span></div><div className="mini-chart"><i /><i /><i /><i /><i /><i /><i /></div><div className="retearn-footer"><span><span className="live-dot" /> 3 live tasks</span><span>Updated moments ago</span></div></div></div></section>
     <section className="section-wrap campaign-preview"><div className="section-heading"><div><div className="section-kicker">OPEN NOW</div><h2>Find your next <em>collab.</em></h2></div><button className="underlined-link" onClick={onExplore}>View all campaigns <ArrowRight size={16} /></button></div>{campaigns.length === 0 ? <div className="empty-state"><PackageCheck size={30} /><strong>New drops are being prepared</strong><p>Live campaigns will appear here once they are published.</p></div> : <div className="campaign-grid">{campaigns.slice(0, 3).map((campaign) => <CampaignCard key={campaign.id} campaign={campaign} />)}</div>}</section>
@@ -257,7 +264,16 @@ function Home({ onExplore, onStart, onGoogle, onConsole, campaigns }: { onExplor
 function Feature({ icon, number, title, text }: { icon: React.ReactNode; number: string; title: string; text: string }) { return <div className="feature"><div className="feature-icon">{icon}</div><span className="feature-number">{number}</span><h3>{title}</h3><p>{text}</p></div>; }
 
 
-function Campaigns({ campaigns, category, setCategory }: { campaigns: Campaign[]; category: string; setCategory: (category: string) => void }) { const categories = ['All', ...Array.from(new Set(campaigns.flatMap((campaign) => campaign.tags)))]; const filtered = category === 'All' ? campaigns : campaigns.filter((campaign) => campaign.tags.includes(category)); return <section className="section-wrap page-section"><div className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> ACTIVE CAMPAIGNS</div><h1>Choose a brief that<br /><em>fits your world.</em></h1></div><p>Every drop has a clear brief, a real product, and a transparent path from order to verification.</p></div>{campaigns.length === 0 ? <div className="empty-state"><PackageCheck size={30} /><strong>No live campaigns yet</strong><p>New drops will appear here as soon as they are published.</p></div> : <><div className="filter-bar"><div>{categories.map((item) => <button className={category === item ? 'filter active' : 'filter'} key={item} onClick={() => setCategory(item)}>{item}</button>)}</div><span><span className="live-dot" /> {filtered.length} campaigns available</span></div><div className="campaign-grid full">{filtered.map((campaign) => <CampaignCard key={campaign.id} campaign={campaign} />)}</div></>}<div className="responsible-note"><ShieldCheck size={20} /><div><strong>Responsible collaboration, always.</strong><p>Campaigns are based on authentic experiences and approved briefs. No paid fake reviews, manipulated ratings, or off-platform pressure.</p></div></div></section>; }
+function Campaigns({ campaigns, category, setCategory, query, onQueryChange }: { campaigns: Campaign[]; category: string; setCategory: (category: string) => void; query: string; onQueryChange: (query: string) => void }) {
+  const categories = ['All', ...Array.from(new Set(campaigns.flatMap((campaign) => campaign.tags)))];
+  const normalized = query.trim().toLowerCase();
+  const filtered = campaigns.filter((campaign) => {
+    const matchesCategory = category === 'All' || campaign.tags.includes(category);
+    const matchesQuery = !normalized || [campaign.name, campaign.platform, campaign.specifications, ...campaign.tags].some((value) => value.toLowerCase().includes(normalized));
+    return matchesCategory && matchesQuery;
+  });
+  return <section className="section-wrap page-section"><div className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> ACTIVE CAMPAIGNS</div><h1>Choose a brief that<br /><em>fits your world.</em></h1></div><p>Every drop has a clear brief, a real product, and a transparent path from order to verification.</p></div>{campaigns.length === 0 ? <div className="empty-state"><PackageCheck size={30} /><strong>No live campaigns yet</strong><p>New drops will appear here as soon as they are published.</p></div> : <><div className="filter-bar"><div>{categories.map((item) => <button className={category === item ? 'filter active' : 'filter'} key={item} onClick={() => setCategory(item)}>{item}</button>)}</div><label className="campaign-filter-search"><Search size={16} /><input type="search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search campaigns" aria-label="Search live campaigns" /></label><span><span className="live-dot" /> {filtered.length} campaigns available</span></div>{filtered.length ? <div className="campaign-grid full">{filtered.map((campaign) => <CampaignCard key={campaign.id} campaign={campaign} />)}</div> : <div className="empty-state"><Search size={26} /><strong>No matching campaigns</strong><p>Try another product, brand, or campaign type.</p></div>}</>}<div className="responsible-note"><ShieldCheck size={20} /><div><strong>Responsible collaboration, always.</strong><p>Campaigns are based on authentic experiences and approved briefs. No paid fake reviews, manipulated ratings, or off-platform pressure.</p></div></div></section>;
+}
 
 function About() { return <section className="section-wrap page-section about-page"><div className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> OUR POINT OF VIEW</div><h1>Better commerce<br /><em>starts with clarity.</em></h1></div><p>BarterKartale sits between brands and communities, making product discovery more human and creator work more sustainable.</p></div><div className="about-hero"><div className="about-number">02 <span>/ 04</span></div><div><h2>Not just another<br />campaign marketplace.</h2><p>We care about the details that make partnerships last: honest product feedback, respectful timelines, and payouts that arrive when the work is genuinely complete.</p></div><div className="about-stamp"><Sparkles size={25} /><span>MADE FOR<br /><b>REAL PEOPLE</b></span></div></div><div className="values-grid"><div><span>01</span><h3>Human first</h3><p>We build around how people actually discover, test, and talk about products.</p></div><div><span>02</span><h3>Built for trust</h3><p>Clear briefs and transparent review checkpoints protect every side of the collaboration.</p></div><div><span>03</span><h3>Always evolving</h3><p>From campus communities to digital creators, we keep opening new doors to opportunity.</p></div></div></section>; }
 
@@ -265,7 +281,7 @@ function Careers({ onSubmit }: { onSubmit: () => void }) { const [submitted, set
 
 function Role({ icon, title, text, tag }: { icon: React.ReactNode; title: string; text: string; tag: string }) { return <div className="role-row"><div className="role-icon">{icon}</div><div><span>{tag}</span><h3>{title}</h3><p>{text}</p></div><ArrowRight size={19} /></div>; }
 
-function AuthModal({ onClose, onError }: { onClose: () => void; onError: (message: string) => void }) {
+function AuthModal({ onClose, onRegistered, onError }: { onClose: () => void; onRegistered: () => void; onError: (message: string) => void }) {
   const [mode, setMode] = useState<'gateway' | 'forgot'>('gateway');
   const [authTab, setAuthTab] = useState<'signin' | 'signup'>('signin');
 
@@ -273,12 +289,12 @@ function AuthModal({ onClose, onError }: { onClose: () => void; onError: (messag
     return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose}><X size={18} /></button><ForgotPasswordPanel onClose={() => setMode('gateway')} onError={onError} /></div></div>;
   }
 
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal access-gateway" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="section-kicker">ACCESS GATEWAY</div><h2>Welcome to<br /><em>BarterKartale.</em></h2><p>Sign in to your dashboard or create a new partner account.</p><GoogleAccessPanel onError={onError} /><div className="auth-separator"><span>— Or use your credentials —</span></div><div className="auth-tabs"><button className={authTab === 'signin' ? 'auth-tab active' : 'auth-tab'} onClick={() => setAuthTab('signin')}>Sign In</button><button className={authTab === 'signup' ? 'auth-tab active' : 'auth-tab'} onClick={() => setAuthTab('signup')}>Sign Up</button></div>{authTab === 'signin' ? <EmailAccessPanel onSuccess={onClose} onError={onError} onForgotPassword={() => setMode('forgot')} /> : <SignUpPanel onSuccess={onClose} onError={onError} />}</div></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal access-gateway" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="section-kicker">ACCESS GATEWAY</div><h2>Welcome to<br /><em>BarterKartale.</em></h2><p>Sign in to your dashboard or create a new partner account.</p><GoogleAccessPanel onError={onError} /><div className="auth-separator"><span>— Or use your credentials —</span></div><div className="auth-tabs"><button className={authTab === 'signin' ? 'auth-tab active' : 'auth-tab'} onClick={() => setAuthTab('signin')}>Sign In</button><button className={authTab === 'signup' ? 'auth-tab active' : 'auth-tab'} onClick={() => setAuthTab('signup')}>Sign Up</button></div>{authTab === 'signin' ? <EmailAccessPanel onSuccess={onClose} onError={onError} onForgotPassword={() => setMode('forgot')} /> : <SignUpPanel onSuccess={() => { onClose(); onRegistered(); }} onError={onError} />}</div></div>;
 }
 
 function StealthModal({ onClose, onSuccess, onError }: { onClose: () => void; onSuccess: (role: PartnerRole, displayName: string | null) => void; onError: (message: string) => void }) { return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose}><X size={18} /></button><StealthLoginPanel onSuccess={onSuccess} onError={onError} /></div></div>; }
 
-function OnboardingModal({ session, onComplete, onError }: { session: Session; onComplete: () => void; onError: (message: string) => void }) { return <div className="modal-backdrop onboarding-backdrop"><OnboardingPanel email={session.user.email || 'your Google account'} onComplete={onComplete} onError={onError} /></div>; }
+function OnboardingModal({ session, onComplete, onError }: { session: Session; onComplete: () => void; onError: (message: string) => void }) { return <div className="modal-backdrop onboarding-backdrop"><OnboardingPanel email={session.user.email || 'your Google account'} initialName={session.user.user_metadata?.full_name || session.user.user_metadata?.name || ''} initialMobile={session.user.user_metadata?.mobile_number || ''} onComplete={onComplete} onError={onError} /></div>; }
 
 function PublicDashboard({ orders, onOrder, onRefund, onSignOut, displayName }: { orders: Order[]; onOrder: (order: Order) => Promise<void>; onRefund: (refund: RefundData) => Promise<void>; onSignOut: () => void; displayName: string }) { const [showOrder, setShowOrder] = useState(false); const [refundOrderId, setRefundOrderId] = useState<string | null>(null); const [query, setQuery] = useState(''); const visibleOrders = orders.filter((order) => matchesOrder(order, query)); return <section className="section-wrap console-page"><div className="console-top"><div><div className="eyebrow"><span className="eyebrow-line" /> PUBLIC INFLUENCER DASHBOARD</div><h1>Welcome, <em>{displayName.split(' ')[0]}.</em></h1><p>Your sponsorship campaigns and partner network, in one focused view.</p></div><div className="console-user"><span className="user-avatar">{displayName.slice(0, 2).toUpperCase()}</span><div><strong>{displayName}</strong><small>Google-verified partner <BadgeCheck size={13} /></small></div></div></div><div className="console-tabs"><button className="active"><Layers3 size={16} /> BarterKartale Log</button><button><Users size={16} /> My Affiliate Net</button></div><div className="dashboard-search"><OrderSearch orders={orders} onSearch={setQuery} /></div><div className="public-dashboard-grid"><BarterLog orders={visibleOrders} hasOrders={orders.length > 0} onOrder={() => setShowOrder(true)} onRefund={(orderId) => setRefundOrderId(orderId)} /><Network /></div><div className="whatsapp-cta"><a className="whatsapp-link" href="https://chat.whatsapp.com/HEaCIH60fQ9GrgbxWYWizh" target="_blank" rel="noopener noreferrer">Join WhatsApp Group <ArrowRight size={16} /></a></div><div className="dashboard-actions"><button className="sign-out-button" onClick={onSignOut}><LogOut size={15} /> Sign out of dashboard</button></div>{showOrder && <OrderModal onClose={() => setShowOrder(false)} onSubmit={async (order) => { await onOrder(order); setShowOrder(false); }} />}{refundOrderId !== null && <RefundModal orders={orders} initialOrderId={refundOrderId} onClose={() => setRefundOrderId(null)} onSubmit={async (refund) => { await onRefund(refund); setRefundOrderId(null); }} />}</section>; }
 
@@ -312,7 +328,7 @@ function RefundModal({ orders, initialOrderId, onClose, onSubmit }: { orders: Or
   const handleSubmit = () => {
     setSubmitting(true);
     onSubmit({
-      enrollmentId: selected?.orderId || null,
+      enrollmentId: selected?.enrollmentId || null,
       name: valueOf('name'),
       platform: valueOf('platform'),
       campaignType: valueOf('deal'),

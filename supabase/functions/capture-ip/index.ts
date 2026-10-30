@@ -14,7 +14,7 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({ ip: clientIp }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
-  } catch (err) {
+  } catch {
     return new Response(
       JSON.stringify({ error: "Unable to determine client IP" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

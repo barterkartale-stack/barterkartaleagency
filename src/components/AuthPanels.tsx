@@ -1,43 +1,14 @@
 import { useState, type FormEvent } from 'react';
-import { ArrowRight, BadgeCheck, LockKeyhole, Mail, ShieldCheck, Fingerprint, MapPin, KeyRound, UserPlus } from 'lucide-react';
+import { ArrowRight, BadgeCheck, LockKeyhole, Mail, ShieldCheck, KeyRound } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 
 export type PartnerRole = 'Reviewer' | 'Assistant_Coordinator' | 'Ground_Manager' | 'Super_Admin';
-
-async function captureSignUpIp(): Promise<string | null> {
-  try {
-    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/capture-ip`;
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    if (!response.ok) return null;
-    const data = await response.json() as { ip?: string | null };
-    return data.ip ?? null;
-  } catch {
-    return null;
-  }
-}
 
 function generateDeviceFingerprint(): string {
   try {
     const nav = navigator;
     const screen = window.screen;
-    const components = [
-      nav.userAgent,
-      nav.language,
-      nav.languages?.join(',') || '',
-      nav.platform,
-      String(screen.width),
-      String(screen.height),
-      String(screen.colorDepth),
-      String(nav.hardwareConcurrency || 0),
-      String((nav as unknown as { deviceMemory?: number }).deviceMemory || 0),
-      Intl.DateTimeFormat().resolvedOptions().timeZone,
-      String(nav.maxTouchPoints || 0),
-    ];
+    const components = [nav.userAgent, nav.language, nav.languages?.join(',') || '', nav.platform, String(screen.width), String(screen.height), String(screen.colorDepth), String(nav.hardwareConcurrency || 0), String((nav as unknown as { deviceMemory?: number }).deviceMemory || 0), Intl.DateTimeFormat().resolvedOptions().timeZone, String(nav.maxTouchPoints || 0)];
     const raw = components.join('|');
     let hash = 0;
     for (let i = 0; i < raw.length; i++) {
@@ -50,6 +21,15 @@ function generateDeviceFingerprint(): string {
   }
 }
 
+function captureDeviceMetadata(): Record<string, string> {
+  return {
+    platform: navigator.platform.slice(0, 120),
+    language: navigator.language.slice(0, 120),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone.slice(0, 120),
+    screen: `${window.screen.width}x${window.screen.height}x${window.screen.colorDepth}`,
+  };
+}
+
 export function GoogleAccessPanel({ onError }: { onError: (message: string) => void }) {
   const [loading, setLoading] = useState(false);
 
@@ -57,7 +37,7 @@ export function GoogleAccessPanel({ onError }: { onError: (message: string) => v
     setLoading(true);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: `${window.location.origin}/dashboard` },
+      options: { redirectTo: import.meta.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/auth/callback` },
     });
     if (error) {
       setLoading(false);
@@ -99,34 +79,69 @@ export function SignUpPanel({ onSuccess, onError }: { onSuccess: () => void; onE
   const [mobile, setMobile] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [invitationCode, setInvitationCode] = useState('');
+  const [securityConsent, setSecurityConsent] = useState(false);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const register = async (): Promise<boolean> => {
+    const { data: registration, error } = await supabase.functions.invoke('register-partner', {
+      body: {
+        displayName: name,
+        mobileNumber: mobile,
+        invitationCode: invitationCode.trim().toUpperCase(),
+        deviceFingerprint: generateDeviceFingerprint(),
+        deviceMetadata: captureDeviceMetadata(),
+        securityConsent,
+      },
+    });
+    if (error || registration?.error) {
+      onError(registration?.error || 'We could not finish registration. Please try again.');
+      return false;
+    }
+    return true;
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setLoading(true);
-    const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
+    const { data: invitation, error: invitationError } = await supabase.functions.invoke('validate-invitation', {
+      body: { invitationCode: invitationCode.trim().toUpperCase() },
+    });
+    if (invitationError || !invitation?.valid) {
+      setLoading(false);
+      onError('That invitation code is invalid, expired, or already used.');
+      return;
+    }
+
+    const { data, error: signUpError } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: {
+        emailRedirectTo: import.meta.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/auth/callback`,
+        data: { display_name: name.trim(), mobile_number: mobile.trim() },
+      },
+    });
     if (signUpError || !data.user) {
       setLoading(false);
-      onError('Could not create your account. This email may already be registered.');
+      onError(signUpError?.status === 429 ? 'Too many account requests. Please wait a moment and try again.' : 'We could not create the account. Check your details and try again.');
       return;
     }
-    const [signUpIp, deviceFingerprint] = await Promise.all([captureSignUpIp(), Promise.resolve(generateDeviceFingerprint())]);
-    const { error: rpcError } = await supabase.rpc('complete_partner_onboarding', {
-      p_display_name: name,
-      p_mobile_number: mobile,
-      p_sign_up_ip: signUpIp,
-      p_device_fingerprint: deviceFingerprint,
-    });
-    if (rpcError) {
+    if (!data.session) {
       setLoading(false);
-      onError('Account created but profile setup failed. Please sign in and complete onboarding.');
+      setAwaitingConfirmation(true);
       return;
     }
+    const registered = await register();
     setLoading(false);
-    onSuccess();
+    if (registered) onSuccess();
   };
 
-  return <form className="email-auth-panel" onSubmit={submit}><label>Full Name<input required value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" /></label><label>Active WhatsApp Number<input required inputMode="tel" pattern="[0-9+() -]{10,15}" value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="10-digit WhatsApp number" /></label><label>Email Address<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com" /></label><label>Create Password<input required minLength={8} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" /></label><button className="primary-button full-button" disabled={loading}>{loading ? 'Creating account…' : 'Create Account'} <ArrowRight size={16} /></button><div className="privacy-disclosure"><ShieldCheck size={14} /><span>For account security and fraud prevention, your login IP address and a device fingerprint are securely logged when you complete this setup. This data is visible only to authorized administrators and is used solely for account verification.</span></div></form>;
+  if (awaitingConfirmation) {
+    return <div className="auth-panel"><div className="login-mark"><Mail size={20} /></div><div className="section-kicker">VERIFY YOUR EMAIL</div><h2>One last <em>check.</em></h2><p>We sent a verification link to <strong>{email}</strong>. Open it to activate your account, then return here to complete your security review. Your invitation is checked again when registration is finalized.</p><div className="privacy-disclosure"><ShieldCheck size={14} /><span>Your registration details and invitation code are not used to activate access until you confirm the security disclosure.</span></div></div>;
+  }
+
+  return <form className="email-auth-panel" onSubmit={submit}><label>Full Name<input required minLength={2} maxLength={100} value={name} onChange={(event) => setName(event.target.value)} placeholder="Your full name" /></label><label>Active WhatsApp Number<input required inputMode="tel" pattern="[0-9+() -]{10,15}" value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="10–15 digits" /></label><label>Email Address<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@gmail.com" /></label><label>Create Password<input required minLength={8} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><label>Agency invitation code<input required autoCapitalize="characters" autoComplete="off" value={invitationCode} onChange={(event) => setInvitationCode(event.target.value.toUpperCase())} placeholder="BK-…" /></label><label className="security-consent"><input required type="checkbox" checked={securityConsent} onChange={(event) => setSecurityConsent(event.target.checked)} /><span>I consent to use of my WhatsApp number for account contact and collection of my sign-in IP and device details for security review. Security records are restricted to authorized administrators.</span></label><button className="primary-button full-button" disabled={loading}>{loading ? 'Checking invitation…' : 'Create Account'} <ArrowRight size={16} /></button><div className="privacy-disclosure"><ShieldCheck size={14} /><span>New partner accounts are reviewed before access is enabled. Most checks take 2–4 hours.</span></div></form>;
 }
 
 export function ForgotPasswordPanel({ onClose, onError }: { onClose: () => void; onError: (message: string) => void }) {
@@ -155,10 +170,12 @@ export function ForgotPasswordPanel({ onClose, onError }: { onClose: () => void;
   return <div className="auth-panel"><div className="login-mark"><KeyRound size={20} /></div><div className="section-kicker">RESET YOUR PASSWORD</div><h2>Forgot <em>password?</em></h2><p>Enter your registered email and we'll send you a secure link to reset your password.</p><form onSubmit={submit}><label>Email address<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@gmail.com" /></label><button className="primary-button full-button" disabled={loading}>{loading ? 'Sending…' : 'Send reset link'} <ArrowRight size={16} /></button></form><button type="button" className="text-button forgot-link" onClick={onClose}><ArrowRight size={14} className="back-arrow" /> Back to sign in</button></div>;
 }
 
-export function OnboardingPanel({ email, onComplete, onError }: { email: string; onComplete: () => void; onError: (message: string) => void }) {
-  const [name, setName] = useState('');
-  const [mobile, setMobile] = useState('');
+export function OnboardingPanel({ email, initialName, initialMobile, onComplete, onError }: { email: string; initialName?: string; initialMobile?: string; onComplete: () => void; onError: (message: string) => void }) {
+  const [name, setName] = useState(initialName || '');
+  const [mobile, setMobile] = useState(initialMobile || '');
   const [password, setPassword] = useState('');
+  const [invitationCode, setInvitationCode] = useState('');
+  const [securityConsent, setSecurityConsent] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -170,22 +187,25 @@ export function OnboardingPanel({ email, onComplete, onError }: { email: string;
       onError('We could not set your password. Please use at least 8 characters.');
       return;
     }
-    const [signUpIp, deviceFingerprint] = await Promise.all([captureSignUpIp(), Promise.resolve(generateDeviceFingerprint())]);
-    const { error } = await supabase.rpc('complete_partner_onboarding', {
-      p_display_name: name,
-      p_mobile_number: mobile,
-      p_sign_up_ip: signUpIp,
-      p_device_fingerprint: deviceFingerprint,
+    const { data, error } = await supabase.functions.invoke('register-partner', {
+      body: {
+        displayName: name,
+        mobileNumber: mobile,
+        invitationCode: invitationCode.trim().toUpperCase(),
+        deviceFingerprint: generateDeviceFingerprint(),
+        deviceMetadata: captureDeviceMetadata(),
+        securityConsent,
+      },
     });
-    if (error) {
+    if (error || data?.error) {
       setLoading(false);
-      onError('We could not finish onboarding. Please check your mobile number and try again.');
+      onError(data?.error || 'We could not finish registration. Please check your invitation code and try again.');
       return;
     }
     onComplete();
   };
 
-  return <div className="auth-panel onboarding-panel"><div className="login-mark"><BadgeCheck size={20} /></div><div className="section-kicker">FIRST-TIME PARTNER SETUP</div><h2>One quick step<br /><em>before we begin.</em></h2><p>Your Google account is connected as <strong>{email}</strong>. Add your mobile number and create a secure backup password for your account.</p><form onSubmit={submit}><label>Full name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label>Mobile number<input required inputMode="tel" pattern="[0-9+() -]{10,15}" value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="10-digit mobile number" /></label><label>Create password<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><button className="primary-button full-button" disabled={loading}>{loading ? 'Saving securely…' : 'Complete setup'} <ArrowRight size={16} /></button></form><div className="privacy-disclosure"><ShieldCheck size={14} /><span>For account security and fraud prevention, your login IP address and a device fingerprint are securely logged when you complete this setup. This data is visible only to authorized administrators and is used solely for account verification.</span></div><small className="form-footnote"><Fingerprint size={13} /> Device ID: <code>{generateDeviceFingerprint().slice(0, 18)}</code> · <MapPin size={13} /> IP captured on submit</small></div>;
+  return <div className="auth-panel onboarding-panel"><div className="login-mark"><BadgeCheck size={20} /></div><div className="section-kicker">PARTNER REGISTRATION</div><h2>One final<br /><em>security check.</em></h2><p>Your Google account is connected as <strong>{email}</strong>. Add your active WhatsApp number, an agency invitation code, and a backup password to continue.</p><form onSubmit={submit}><label>Full name<input required minLength={2} maxLength={100} autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label>Active WhatsApp number<input required inputMode="tel" pattern="[0-9+() -]{10,15}" autoComplete="tel" value={mobile} onChange={(event) => setMobile(event.target.value)} placeholder="10–15 digits" /></label><label>Agency invitation code<input required autoCapitalize="characters" autoComplete="off" value={invitationCode} onChange={(event) => setInvitationCode(event.target.value.toUpperCase())} placeholder="BK-…" /></label><label>Create backup password<input required minLength={8} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label><label className="security-consent"><input required type="checkbox" checked={securityConsent} onChange={(event) => setSecurityConsent(event.target.checked)} /><span>I consent to collection of my sign-in IP address and device details for account security and fraud prevention. This information is restricted to authorized administrators.</span></label><button className="primary-button full-button" disabled={loading}>{loading ? 'Checking invitation…' : 'Submit for review'} <ArrowRight size={16} /></button></form><div className="privacy-disclosure"><ShieldCheck size={14} /><span>Your registration is not complete until the invitation code is verified and this security disclosure is accepted. Most reviews take 2–4 hours.</span></div></div>;
 }
 
 export function StealthLoginPanel({ onSuccess, onError }: { onSuccess: (role: PartnerRole, displayName: string | null) => void; onError: (message: string) => void }) {
