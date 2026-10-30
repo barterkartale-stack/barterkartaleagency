@@ -13,6 +13,8 @@ type Campaign = {
   platform: string;
   incentive_amount: number;
   campaign_link: string;
+  tags: string[];
+  specifications: string;
   is_active: boolean;
   created_at: string;
 };
@@ -159,13 +161,21 @@ function CampaignManager({ campaigns, onRefresh }: { campaigns: Campaign[]; onRe
   );
 }
 
+const CAMPAIGN_TAGS = ['Electronics', 'Home', 'Beauty', 'Fashion', 'Kitchen', 'Audio', 'Personal Care', 'Appliances'];
+
 function CampaignForm({ editing, onClose, onSaved }: { editing: Campaign | null; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(editing?.name || '');
   const [platform, setPlatform] = useState(editing?.platform || 'Amazon');
-  const [incentive, setIncentive] = useState(String(editing?.incentive_amount || ''));
+  const [incentive, setIncentive] = useState(editing ? String(editing.incentive_amount) : '');
   const [link, setLink] = useState(editing?.campaign_link || '');
+  const [tags, setTags] = useState<string[]>(editing?.tags || []);
+  const [specifications, setSpecifications] = useState(editing?.specifications || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const toggleTag = (tag: string): void => {
+    setTags((current) => (current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag]));
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -178,11 +188,13 @@ function CampaignForm({ editing, onClose, onSaved }: { editing: Campaign | null;
       return;
     }
     const { error: rpcError } = await supabase.rpc('save_campaign', {
-      p_name: name,
+      p_name: name.trim(),
       p_platform: platform,
       p_incentive: incentiveNum,
-      p_link: link,
+      p_link: link.trim(),
       p_campaign_id: editing?.id || null,
+      p_tags: tags,
+      p_specifications: specifications.trim(),
     });
     if (rpcError) {
       setError('Could not save the campaign. Please try again.');
@@ -201,11 +213,22 @@ function CampaignForm({ editing, onClose, onSaved }: { editing: Campaign | null;
         <h2>{editing ? 'Edit campaign' : 'Create a new'} <em>campaign.</em></h2>
         <form onSubmit={submit}>
           <div className="form-grid">
-            <label className="wide">Campaign name<input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Bolt Evo Air Pro Drop" /></label>
-            <label>Platform<select value={platform} onChange={(e) => setPlatform(e.target.value)}>{PLATFORMS.map((p) => <option key={p}>{p}</option>)}</select></label>
-            <label>Incentive (in ₹)<input required type="number" min={0} value={incentive} onChange={(e) => setIncentive(e.target.value)} placeholder="e.g. 2500" /></label>
-            <label className="wide">Campaign link<input required type="url" value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…" /></label>
+            <label className="wide">Campaign Title<input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Bolt Evo Air Pro Drop" /></label>
+            <label>E-Commerce Platform<select value={platform} onChange={(e) => setPlatform(e.target.value)}>{PLATFORMS.map((p) => <option key={p}>{p}</option>)}</select></label>
+            <label>Exact incentive matrix (in ₹)<input required type="number" min={0} value={incentive} onChange={(e) => setIncentive(e.target.value)} placeholder="e.g. 2500" /></label>
+            <label className="wide">Direct destination URL<input required type="url" value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…" /></label>
           </div>
+          <div className="form-section">
+            <span className="form-section-label">Custom tags</span>
+            <div className="tag-option-row">
+              {CAMPAIGN_TAGS.map((tag) => (
+                <button type="button" key={tag} className={tags.includes(tag) ? 'tag-option selected' : 'tag-option'} aria-pressed={tags.includes(tag)} onClick={() => toggleTag(tag)}>{tag}</button>
+              ))}
+            </div>
+          </div>
+          <label className="form-textarea-label">Extra technical details and specifications
+            <textarea value={specifications} onChange={(e) => setSpecifications(e.target.value)} maxLength={5000} placeholder="Product guidelines, terms, model specs, delivery notes..." />
+          </label>
           {error && <p className="form-error">{error}</p>}
           <button className="primary-button full-button" disabled={saving}>{saving ? 'Saving…' : <><Save size={16} /> {editing ? 'Update campaign' : 'Create campaign'}</>} <ArrowRight size={16} /></button>
         </form>
