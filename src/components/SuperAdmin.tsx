@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 import { OrderSearch, matchesOrder } from '@/components/OrderSearch';
+import { GoogleFormSettings } from '@/components/GoogleFormSettings';
 import {
   ArrowRight, BadgeCheck, Ban, CheckCircle2, Edit3, ExternalLink, IndianRupee,
-  LayoutDashboard, LockKeyhole, LogOut, MapPin, Fingerprint, Plus, Save,
-  Search, ShieldCheck, ToggleLeft, ToggleRight, Users, X, Zap
+  LayoutDashboard, Link2, LockKeyhole, LogOut, MapPin, Fingerprint, Plus, Save,
+  Search, ShieldCheck, ToggleLeft, ToggleRight, Users, X
 } from 'lucide-react';
 
 type Campaign = {
@@ -28,16 +29,22 @@ type AdminUser = {
   access_status: string;
   sign_up_ip: string | null;
   device_fingerprint: string | null;
+  device_metadata?: Record<string, string>;
+  registered_at?: string | null;
+  security_consent_at?: string | null;
   created_at: string;
 };
+
+type BlacklistEntry = { ip_address: string; reason: string; is_active: boolean; created_at: string };
 
 const WHATSAPP_PUBLIC = 'https://chat.whatsapp.com/HEaCIH60fQ9GrgbxWYWizh';
 const PLATFORMS = ['Amazon', 'Flipkart', 'Myntra', 'Meesho'];
 
 export function SuperAdmin({ onSignOut, displayName }: { onSignOut: () => void; displayName: string }) {
-  const [tab, setTab] = useState<'campaigns' | 'users'>('campaigns');
+  const [tab, setTab] = useState<'campaigns' | 'users' | 'integrations'>('campaigns');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -47,12 +54,20 @@ export function SuperAdmin({ onSignOut, displayName }: { onSignOut: () => void; 
 
   const loadData = async (): Promise<void> => {
     setLoading(true);
-    const [{ data: campaignData }, { data: userData }] = await Promise.all([
+    const [campaignResult, userResult, blacklistResult] = await Promise.all([
       supabase.from('campaigns').select('*').order('created_at', { ascending: false }),
-      supabase.from('profiles').select('id, email, display_name, mobile_number, role, access_status, sign_up_ip, device_fingerprint, created_at').order('created_at', { ascending: false }),
+      supabase.rpc('list_admin_profiles'),
+      supabase.rpc('list_agency_ip_blacklist'),
     ]);
-    if (campaignData) setCampaigns(campaignData as Campaign[]);
-    if (userData) setUsers(userData as AdminUser[]);
+    if (campaignResult.error || userResult.error || blacklistResult.error) {
+      setError('Admin records could not be loaded. Confirm your account still has Super Admin access.');
+      setLoading(false);
+      return;
+    }
+    if (campaignResult.data) setCampaigns(campaignResult.data as Campaign[]);
+    if (userResult.data) setUsers(userResult.data as AdminUser[]);
+    if (blacklistResult.data) setBlacklist(blacklistResult.data as BlacklistEntry[]);
+    setError('');
     setLoading(false);
   };
 
@@ -73,6 +88,7 @@ export function SuperAdmin({ onSignOut, displayName }: { onSignOut: () => void; 
       <div className="console-tabs">
         <button className={tab === 'campaigns' ? 'active' : ''} onClick={() => setTab('campaigns')}><LayoutDashboard size={16} /> Campaign Manager</button>
         <button className={tab === 'users' ? 'active' : ''} onClick={() => setTab('users')}><Users size={16} /> User Management</button>
+        <button className={tab === 'integrations' ? 'active' : ''} onClick={() => setTab('integrations')}><Link2 size={16} /> Forms & access</button>
       </div>
 
       {loading ? (
@@ -81,8 +97,10 @@ export function SuperAdmin({ onSignOut, displayName }: { onSignOut: () => void; 
         <div className="empty-state"><X size={30} /><strong>{error}</strong></div>
       ) : tab === 'campaigns' ? (
         <CampaignManager campaigns={campaigns} onRefresh={loadData} />
+      ) : tab === 'users' ? (
+        <UserTerminal users={users} blacklist={blacklist} onRefresh={loadData} />
       ) : (
-        <UserTerminal users={users} onRefresh={loadData} />
+        <GoogleFormSettings />
       )}
 
       <div className="dashboard-actions">
@@ -237,72 +255,69 @@ function CampaignForm({ editing, onClose, onSaved }: { editing: Campaign | null;
   );
 }
 
-function UserTerminal({ users, onRefresh }: { users: AdminUser[]; onRefresh: () => Promise<void> }) {
+function UserTerminal({ users, blacklist, onRefresh }: { users: AdminUser[]; blacklist: BlacklistEntry[]; onRefresh: () => Promise<void> }) {
   const [query, setQuery] = useState('');
   const [acting, setActing] = useState<string | null>(null);
+  const [actionError, setActionError] = useState('');
+  const activeIps = new Set(blacklist.filter((item) => item.is_active).map((item) => item.ip_address));
+  const searchableUsers = users.map((user) => ({ orderId: user.email, name: user.display_name || user.email, platform: user.role, deal: user.access_status }));
+  const visible = users.filter((user) => matchesOrder({ orderId: user.email, name: user.display_name || '', platform: user.role, deal: user.access_status }, query));
+  const activeBlacklist = blacklist.filter((item) => item.is_active);
 
-  const searchableUsers = users.map((u) => ({
-    orderId: u.email,
-    name: u.display_name || u.email,
-    platform: u.role,
-    deal: u.access_status,
-  }));
-  const visible = users.filter((u) => matchesOrder(
-    { orderId: u.email, name: u.display_name || '', platform: u.role, deal: u.access_status },
-    query
-  ));
-
-  const setStatus = async (userId: string, status: 'active' | 'revoked' | 'banned'): Promise<void> => {
+  const setStatus = async (userId: string, status: 'active' | 'revoked'): Promise<void> => {
     setActing(userId);
-    await supabase.rpc('set_user_access_status', { p_user_id: userId, p_status: status });
+    setActionError('');
+    const { error } = await supabase.rpc('set_user_access_status', { p_user_id: userId, p_status: status });
     setActing(null);
+    if (error) { setActionError(error.message || 'Access status could not be updated.'); return; }
+    await onRefresh();
+  };
+
+  const blacklistUser = async (user: AdminUser): Promise<void> => {
+    setActing(user.id);
+    setActionError('');
+    const { error } = await supabase.rpc('blacklist_partner_ip', { p_user_id: user.id, p_reason: 'Administrator security review' });
+    setActing(null);
+    if (error) { setActionError(error.message || 'This account IP could not be blocked.'); return; }
+    await onRefresh();
+  };
+
+  const setIpStatus = async (ip: string): Promise<void> => {
+    setActing(ip);
+    setActionError('');
+    const { error } = await supabase.rpc('set_agency_ip_blacklist_status', { p_ip: ip, p_is_active: false });
+    setActing(null);
+    if (error) { setActionError(error.message || 'IP block could not be removed.'); return; }
     await onRefresh();
   };
 
   return (
     <div className="admin-users">
-      <div className="panel-heading">
-        <div>
-          <span className="section-kicker">USER MANAGEMENT TERMINAL</span>
-          <h2>Security & access control.</h2>
-        </div>
-        <span className="live-badge"><i /> {users.length} USERS</span>
-      </div>
-
-      <div className="dashboard-search">
-        <OrderSearch orders={searchableUsers} onSearch={setQuery} />
-      </div>
-
-      {visible.length === 0 ? (
-        <div className="empty-state"><Search size={30} /><strong>No users found</strong><p>Try a different search term.</p></div>
-      ) : (
+      <div className="panel-heading"><div><span className="section-kicker">USER MANAGEMENT TERMINAL</span><h2>Security & access control.</h2></div><span className="live-badge"><i /> {users.length} USERS</span></div>
+      <div className="dashboard-search"><OrderSearch orders={searchableUsers} onSearch={setQuery} /></div>
+      {actionError && <div className="settings-message error" role="alert">{actionError}</div>}
+      {visible.length === 0 ? <div className="empty-state"><Search size={30} /><strong>No users found</strong><p>Try a different search term.</p></div> : (
         <div className="user-admin-table">
-          <div className="table-head"><span>NAME</span><span>WHATSAPP / EMAIL</span><span>ROLE</span><span>IP / DEVICE</span><span>STATUS</span><span>ACTIONS</span></div>
+          <div className="table-head"><span>NAME / REGISTERED</span><span>WHATSAPP / EMAIL</span><span>ROLE</span><span>IP / DEVICE</span><span>STATUS</span><span>ACTIONS</span></div>
           {visible.map((user) => (
             <div className="table-row user-row-admin" key={user.id}>
-              <strong>{user.display_name || 'Unnamed'}</strong>
+              <span><strong>{user.display_name || 'Unnamed'}</strong><small className="admin-registered-at">{user.registered_at ? new Date(user.registered_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Registration time unavailable'}</small><small className="admin-registered-at">{user.security_consent_at ? 'Security consent recorded' : 'Security consent unavailable'}</small></span>
               <span>{user.mobile_number || '—'}<br />{user.email}</span>
               <span>{user.role.replace(/_/g, ' ')}</span>
-              <span className="ip-device-cell">
-                <span className="ip-line"><MapPin size={12} /> {user.sign_up_ip || '—'}</span>
-                <span className="ip-line"><Fingerprint size={12} /> {user.device_fingerprint?.slice(0, 20) || '—'}</span>
-              </span>
+              <span className="ip-device-cell"><span className="ip-line"><MapPin size={12} /> {user.sign_up_ip || '—'}</span><span className="ip-line"><Fingerprint size={12} /> {user.device_fingerprint?.slice(0, 20) || '—'}</span><span className="ip-line">{user.device_metadata?.platform || 'Device details unavailable'} · {user.device_metadata?.timezone || '—'}</span></span>
               <span className={user.access_status === 'active' ? 'table-status verified' : user.access_status === 'banned' ? 'table-status banned' : 'table-status revoked'}><i /> {user.access_status}</span>
               <div className="row-actions">
-                <button className="link-chip approve" disabled={acting === user.id || user.access_status === 'active'} onClick={() => void setStatus(user.id, 'active')}>
-                  <CheckCircle2 size={12} /> Approve
-                </button>
-                <button className="link-chip revoke" disabled={acting === user.id || user.access_status === 'revoked'} onClick={() => void setStatus(user.id, 'revoked')}>
-                  <LockKeyhole size={12} /> Revoke
-                </button>
-                <button className="link-chip ban" disabled={acting === user.id || user.access_status === 'banned'} onClick={() => void setStatus(user.id, 'banned')}>
-                  <Ban size={12} /> Ban
-                </button>
+                <button className="link-chip approve" disabled={acting === user.id || user.access_status === 'active'} onClick={() => void setStatus(user.id, 'active')}><CheckCircle2 size={12} /> Approve</button>
+                <button className="link-chip revoke" disabled={acting === user.id || user.access_status === 'revoked'} onClick={() => void setStatus(user.id, 'revoked')}><LockKeyhole size={12} /> Revoke</button>
+                <button className="link-chip ban" disabled={acting === user.id || !user.sign_up_ip || activeIps.has(user.sign_up_ip)} onClick={() => void blacklistUser(user)}><Ban size={12} /> {activeIps.has(user.sign_up_ip || '') ? 'IP blocked' : 'Ban + block IP'}</button>
               </div>
             </div>
           ))}
         </div>
       )}
+      <section className="blacklist-admin-panel"><div className="panel-heading"><div><span className="section-kicker">NETWORK CONTROLS</span><h3>Blocked registration IPs.</h3></div><span className="live-badge">{activeBlacklist.length} ACTIVE</span></div>
+        {activeBlacklist.length ? activeBlacklist.map((item) => <div className="blacklist-admin-row" key={item.ip_address}><span><strong>{item.ip_address}</strong><small>{item.reason || 'Security review'} · {new Date(item.created_at).toLocaleDateString('en-IN')}</small></span><button className="link-chip approve" disabled={acting === item.ip_address} onClick={() => void setIpStatus(item.ip_address)}><CheckCircle2 size={12} /> Unblock IP</button></div>) : <p className="blacklist-empty">No active IP blocks.</p>}
+      </section>
     </div>
   );
 }
